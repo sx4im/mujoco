@@ -1115,6 +1115,14 @@ void mjXWriter::OneGeom(XMLElement* elem, const mjCGeom* geom, mjCDef* def, stri
   }
   if (mjuu_defined(geom->mass)) {
     WriteAttr(elem, "mass", 1, &geom->mass_, &mass);
+    if (writingdefaults && SameVector(&geom->mass_, &mass, 1)) {
+      // The mass was not written because it equals this geom's volume times
+      // the parent default density. A default-class geom has no size, so its
+      // volume is 0 and this says nothing about the density inherited by
+      // geoms of any size: preserve the class density, or geoms using the
+      // class would silently regain the parent default density.
+      WriteAttr(elem, "density", 1, &geom->density, &def->Geom().density);
+    }
   } else {
     WriteAttr(elem, "density", 1, &geom->density, &def->Geom().density);
   }

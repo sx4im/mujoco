@@ -3437,6 +3437,56 @@ TEST_F(AsWrittenTest, SavesShortcutDefaults) {
   }
 }
 
+// A geom default class with mass="0" density="0" keeps its density when saved
+// in compiled mode: the class geom has no size, so its volume is 0 and its
+// mass (0) equals volume times the parent default density, which used to
+// suppress both attributes and let geoms using the class regain density 1000.
+TEST_F(AsWrittenTest, SavesZeroMassDensityDefaultClass) {
+  static constexpr char xml[] = R"(<mujoco>
+  <default>
+    <default class="collision">
+      <geom type="box" mass="0" density="0"/>
+    </default>
+  </default>
+  <worldbody>
+    <body name="b">
+      <geom class="collision" size="0.1 0.1 0.1"/>
+      <geom type="sphere" size="0.05" mass="1.666555"/>
+    </body>
+  </worldbody>
+</mujoco>
+)";
+  for (bool savecompiled : {false, true}) {
+    mjSpec* spec = ParseAsWritten(xml);
+    ASSERT_THAT(spec, NotNull());
+    mjModel* model = mj_compile(spec, nullptr);
+    ASSERT_THAT(model, NotNull()) << mjs_getError(spec);
+    ASSERT_NEAR(model->body_mass[1], 1.666555, 1e-6);
+    spec->compiler.savecompiled = savecompiled;
+    std::string saved = SaveAndReadXml(spec);
+    if (savecompiled) {
+      EXPECT_THAT(saved, HasSubstr(R"(<geom type="box" density="0"/>)"));
+    }
+
+    std::array<char, 1024> error;
+    mjSpec* reloaded =
+        mj_parseXMLString(saved.c_str(), nullptr, error.data(), error.size());
+    ASSERT_THAT(reloaded, NotNull()) << error.data() << "\n" << saved;
+    mjModel* remodel = mj_compile(reloaded, nullptr);
+    ASSERT_THAT(remodel, NotNull()) << mjs_getError(reloaded);
+    EXPECT_NEAR(remodel->body_mass[1], 1.666555, 1e-5);
+    std::string field;
+    EXPECT_LE(CompareModel(model, remodel, field), savecompiled ? 1e-6 : 0)
+        << field << "\n"
+        << saved;
+
+    mj_deleteModel(remodel);
+    mj_deleteSpec(reloaded);
+    mj_deleteModel(model);
+    mj_deleteSpec(spec);
+  }
+}
+
 // a shortcut under a general default with its gain model, or under a general
 // child class of a shortcut default, keeps its tag; an inherited range is
 // written only where it is not already inherited
