@@ -106,7 +106,20 @@ FilePath ResolveFilePath(XMLElement*     e,
       break;
     }
   }
-  return FilePath(path) + filename;
+  FilePath resolved = FilePath(path) + filename;
+  // The include directory is relative to the working directory (or
+  // absolute), while callers resolve the returned path against `dir`.
+  // When the included file lives under `dir`, the include directory already
+  // contains it; return the path relative to `dir` so the directory is not
+  // prepended twice (e.g. "case2/case2/sub/child.xml").
+  string dir_str = dir.Str();
+  if (!dir_str.empty()) {
+    if (dir_str.back() != '/' && dir_str.back() != '\\') { dir_str += '/'; }
+    if (resolved.Str().starts_with(dir_str)) {
+      return FilePath(resolved.Str().substr(dir_str.size()));
+    }
+  }
+  return resolved;
 }
 
 // Thrown inside mju_getXMLDependencies so C++ stack objects are destroyed

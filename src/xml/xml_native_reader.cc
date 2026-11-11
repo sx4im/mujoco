@@ -2033,7 +2033,11 @@ void mjXReader::Asset(XMLElement* section, const mjVFS* vfs) {
 
       // parse the child
       std::array<char, 1024> error;
-      auto                   filename = modelfiledir_ + ReadAttrFile(elem, "file", vfs).value();
+      // Resolve against the model file directory, so a child model in an
+      // included file is found under that directory instead of being looked
+      // up with the directory twice (see issue #3835).
+      auto filename =
+          modelfiledir_ + ReadAttrFile(elem, "file", vfs, modelfiledir_).value();
 
       mjSpec* child =
           mj_parse(filename.c_str(), content_type.c_str(), vfs, error.data(), error.size());

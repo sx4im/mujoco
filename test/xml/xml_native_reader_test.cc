@@ -18,6 +18,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
@@ -2532,6 +2534,171 @@ TEST_F(XMLReaderTest, LookupCompilerOptionWithoutSpecCopy) {
   mj_deleteModel(copied_model);
 
   mj_deleteVFS(vfs.get());
+}
+
+// Writes `contents` to `path`, creating parent directories as needed.
+void WriteTestFile(const std::filesystem::path& path, const char* contents) {
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  ASSERT_FALSE(ec);
+  std::ofstream out(path);
+  ASSERT_TRUE(out.is_open());
+  out << contents;
+}
+
+// Restores the working directory on destruction.
+struct ScopedWorkingDir {
+  explicit ScopedWorkingDir(const std::filesystem::path& dir) {
+    std::error_code ec;
+    previous_ = std::filesystem::current_path(ec);
+    std::filesystem::current_path(dir, ec);
+  }
+  ~ScopedWorkingDir() {
+    std::error_code ec;
+    std::filesystem::current_path(previous_, ec);
+  }
+  std::filesystem::path previous_;
+};
+
+// Regression test for https://github.com/google-deepmind/mujoco/issues/3835:
+// a <model> asset in an included file must be found at
+// "case2/sub/child.xml" when the top-level file is loaded as
+// "case2/scene.xml" from the directory above case2. Before the fix the
+// model directory was prepended twice ("case2/case2/sub/child.xml").
+TEST_F(XMLReaderTest, ModelAssetInIncludedFileLoadedWithDirPrefix) {
+  namespace fs = std::filesystem;
+  static constexpr char scene_xml[] = R"(
+  <mujoco>
+    <include file="robot.xml"/>
+  </mujoco>
+  )";
+  static constexpr char robot_xml[] = R"(
+  <mujoco>
+    <asset>
+      <model name="child" file="sub/child.xml"/>
+    </asset>
+    <worldbody>
+      <body name="b">
+        <geom size="0.1"/>
+        <attach model="child" body="c" prefix="x_"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  static constexpr char child_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body name="c">
+        <geom size="0.05"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  const fs::path root =
+      fs::temp_directory_path() / "mujoco_3835_model_asset_included_file";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  const fs::path scene_dir = root / "case2";
+  WriteTestFile(scene_dir / "scene.xml", scene_xml);
+  WriteTestFile(scene_dir / "robot.xml", robot_xml);
+  WriteTestFile(scene_dir / "sub" / "child.xml", child_xml);
+
+  std::array<char, 1024> error;
+  {
+    // Load "case2/scene.xml" from the directory above case2: the failing
+    // case in the issue.
+    ScopedWorkingDir cwd(root);
+    mjModel* model =
+        mj_loadXML("case2/scene.xml", nullptr, error.data(), error.size());
+    ASSERT_THAT(model, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(model);
+  }
+  {
+    // The included file on its own, from the same directory.
+    ScopedWorkingDir cwd(root);
+    mjModel* model =
+        mj_loadXML("case2/robot.xml", nullptr, error.data(), error.size());
+    ASSERT_THAT(model, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(model);
+  }
+  {
+    // From inside case2.
+    ScopedWorkingDir cwd(scene_dir);
+    mjModel* model =
+        mj_loadXML("scene.xml", nullptr, error.data(), error.size());
+    ASSERT_THAT(model, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(model);
+  }
+  {
+    // By absolute path.
+    ScopedWorkingDir cwd(root);
+    const std::string abs_path = (scene_dir / "scene.xml").string();
+    mjModel* model =
+        mj_loadXML(abs_path.c_str(), nullptr, error.data(), error.size());
+    ASSERT_THAT(model, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(model);
+  }
+
+  fs::remove_all(root, ec);
+}
+
+// Same double-directory bug one level deeper: the child model lives in a
+// subdirectory of the included file's directory, not under the top-level
+// model directory, so it is only found through the enclosing <include>
+// element's directory.
+TEST_F(XMLReaderTest, ModelAssetInNestedIncludedFile) {
+  namespace fs = std::filesystem;
+  static constexpr char scene_xml[] = R"(
+  <mujoco>
+    <include file="sub/robot.xml"/>
+  </mujoco>
+  )";
+  static constexpr char robot_xml[] = R"(
+  <mujoco>
+    <asset>
+      <model name="child" file="nested/child.xml"/>
+    </asset>
+    <worldbody>
+      <body name="b">
+        <geom size="0.1"/>
+        <attach model="child" body="c" prefix="x_"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  static constexpr char child_xml[] = R"(
+  <mujoco>
+    <worldbody>
+      <body name="c">
+        <geom size="0.05"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+
+  const fs::path root =
+      fs::temp_directory_path() / "mujoco_3835_model_asset_nested_include";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  const fs::path scene_dir = root / "case2";
+  WriteTestFile(scene_dir / "scene.xml", scene_xml);
+  WriteTestFile(scene_dir / "sub" / "robot.xml", robot_xml);
+  WriteTestFile(scene_dir / "sub" / "nested" / "child.xml", child_xml);
+
+  std::array<char, 1024> error;
+  ScopedWorkingDir cwd(root);
+  mjModel* model =
+      mj_loadXML("case2/scene.xml", nullptr, error.data(), error.size());
+  ASSERT_THAT(model, NotNull()) << error.data();
+  EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+  mj_deleteModel(model);
+
+  fs::remove_all(root, ec);
 }
 
 TEST_F(XMLReaderTest, ResizeKeyframeAfterParsing) {
