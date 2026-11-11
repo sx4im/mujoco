@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <gmock/gmock.h>
@@ -502,6 +503,97 @@ TEST_F(XMLWriterTest, KeepsCompiledInertiaOfEditedSpec) {
 
     mj_deleteModel(model);
     mj_deleteSpec(spec);
+  }
+}
+
+TEST_F(XMLWriterTest, KeepsZeroMassDensityDefaultClass) {
+  // https://github.com/google-deepmind/mujoco/issues/3834: a default class which sets
+  // both mass="0" and density="0" must keep one of them when saved compiled, or the
+  // geoms which use it gain the default density on reload.
+  static constexpr char xml[] = R"(
+  <mujoco>
+    <default>
+      <default class="collision">
+        <geom type="box" mass="0" density="0"/>
+      </default>
+    </default>
+    <worldbody>
+      <body name="b">
+        <geom class="collision" size="0.1 0.1 0.1"/>
+        <geom type="sphere" size="0.05" mass="1.666555"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  FullFloatPrecision increase_precision;
+  MjModelPtr model = LoadModelFromString(xml);
+  ASSERT_THAT(model.get(), NotNull());
+  ASSERT_NEAR(model->body_mass[1], 1.666555, MjTol(1e-12, 1e-5));
+
+  std::string saved_xml = SaveAndReadXml(model.get());
+  EXPECT_THAT(saved_xml, HasSubstr("<geom type=\"box\" mass=\"0\"/>")) << saved_xml;
+
+  std::array<char, 1024> error;
+  MjModelPtr reloaded =
+      LoadModelFromString(saved_xml.c_str(), error.data(), error.size());
+  ASSERT_THAT(reloaded.get(), NotNull()) << error.data() << "\n" << saved_xml;
+  EXPECT_NEAR(reloaded->body_mass[1], model->body_mass[1], MjTol(1e-12, 1e-5))
+      << saved_xml;
+}
+
+TEST_F(XMLWriterTest, KeepsZeroMassOrDensityDefaultClass) {
+  // Either attribute on its own must also survive a compiled save: a mass on its
+  // own is written on each geom which uses the class, a density on its own on the
+  // class itself.
+  static constexpr char xml_mass[] = R"(
+  <mujoco>
+    <default>
+      <default class="collision">
+        <geom type="box" mass="0"/>
+      </default>
+    </default>
+    <worldbody>
+      <body name="b">
+        <geom class="collision" size="0.1 0.1 0.1"/>
+        <geom type="sphere" size="0.05" mass="1.666555"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  static constexpr char xml_density[] = R"(
+  <mujoco>
+    <default>
+      <default class="collision">
+        <geom type="box" density="0"/>
+      </default>
+    </default>
+    <worldbody>
+      <body name="b">
+        <geom class="collision" size="0.1 0.1 0.1"/>
+        <geom type="sphere" size="0.05" mass="1.666555"/>
+      </body>
+    </worldbody>
+  </mujoco>
+  )";
+  FullFloatPrecision increase_precision;
+  for (const auto& [model_xml, kept, dropped] :
+       {std::tuple{xml_mass, "mass", "density"},
+        std::tuple{xml_density, "density", "mass"}}) {
+    MjModelPtr model = LoadModelFromString(model_xml);
+    ASSERT_THAT(model.get(), NotNull());
+    ASSERT_NEAR(model->body_mass[1], 1.666555, MjTol(1e-12, 1e-5));
+
+    std::string saved_xml = SaveAndReadXml(model.get());
+    EXPECT_THAT(saved_xml, HasSubstr(std::string(kept) + "=\"0\"")) << saved_xml;
+    EXPECT_THAT(saved_xml, Not(HasSubstr(std::string(dropped) + "=\"0\"")))
+        << saved_xml;
+
+    std::array<char, 1024> error;
+    MjModelPtr reloaded =
+        LoadModelFromString(saved_xml.c_str(), error.data(), error.size());
+    ASSERT_THAT(reloaded.get(), NotNull()) << error.data() << "\n" << saved_xml;
+    EXPECT_NEAR(reloaded->body_mass[1], model->body_mass[1], MjTol(1e-12, 1e-5))
+        << saved_xml;
   }
 }
 

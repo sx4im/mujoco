@@ -1113,7 +1113,22 @@ void mjXWriter::OneGeom(XMLElement* elem, const mjCGeom* geom, mjCDef* def, stri
   if (geom->type != mjGEOM_MESH) {
     WriteAttrKey(elem, "shellinertia", bool_map, 2, geom->typeinertia, def->Geom().typeinertia);
   }
-  if (mjuu_defined(geom->mass)) {
+  if (writingdefaults) {
+    // A default class is never compiled, so its mass_ is not the mass it stands for, and it
+    // has no size from which a mass could be implied by its density: write the mass it gives
+    // against the mass of its parent class, and the density when it gives no mass. Otherwise
+    // an explicit zero mass is dropped -- the mass it is compared against is also zero -- and
+    // the density which would stand for it is never written.
+    if (mjuu_defined(geom->mass)) {
+      WriteAttr(elem,
+                "mass",
+                1,
+                &geom->mass,
+                mjuu_defined(def->Geom().mass) ? &def->Geom().mass : nullptr);
+    } else {
+      WriteAttr(elem, "density", 1, &geom->density, &def->Geom().density);
+    }
+  } else if (mjuu_defined(geom->mass)) {
     WriteAttr(elem, "mass", 1, &geom->mass_, &mass);
   } else {
     WriteAttr(elem, "density", 1, &geom->density, &def->Geom().density);
