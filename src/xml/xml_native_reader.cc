@@ -2033,7 +2033,26 @@ void mjXReader::Asset(XMLElement* section, const mjVFS* vfs) {
 
       // parse the child
       std::array<char, 1024> error;
-      auto                   filename = modelfiledir_ + ReadAttrFile(elem, "file", vfs).value();
+      auto                   resolved = ReadAttrFile(elem, "file", vfs).value();
+
+      // The resolved path is relative to the model directory when the file
+      // was found there, but it already carries the directory of the file
+      // that included this element when it was found through an <include>.
+      // Prefer the model-directory path; fall back to the resolved path
+      // as-is when that does not open, so the directory is not counted
+      // twice (e.g. "case2/case2/sub/child.xml" for a <model> in an
+      // included file loaded as "case2/scene.xml").
+      auto filename = modelfiledir_ + resolved;
+      mjResource* probe = mju_openResource("", filename.c_str(), vfs, nullptr, 0);
+      if (probe) {
+        mju_closeResource(probe);
+      } else {
+        probe = mju_openResource("", resolved.c_str(), vfs, nullptr, 0);
+        if (probe) {
+          mju_closeResource(probe);
+          filename = resolved;
+        }
+      }
 
       mjSpec* child =
           mj_parse(filename.c_str(), content_type.c_str(), vfs, error.data(), error.size());

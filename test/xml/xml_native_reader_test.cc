@@ -18,6 +18,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>  // NOLINT
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
@@ -897,6 +899,92 @@ TEST_F(XMLReaderTest, FallbackIncludePathTest) {
   EXPECT_EQ(mj_name2id(model, mjOBJ_GEOM, "another_box"), 3);
   mj_deleteModel(model);
   mj_deleteVFS(&vfs);
+}
+
+// A <model> asset in an included file must be looked up once, not twice,
+// against the model directory: loading "case2/scene.xml" used to fail with
+// "Error opening file 'case2/case2/sub/child.xml'". The files live on disk:
+// the buffer VFS matches files by basename, so it cannot tell the doubled
+// path apart from the right one. Mirrors the three relative-path loads of
+// the issue (the absolute-path load is the same code path with an absolute
+// model directory).
+TEST_F(XMLReaderTest, ModelAssetInIncludeTest) {
+  static constexpr char scene[] = R"(
+  <mujoco>
+    <include file="robot.xml"/>
+  </mujoco>)";
+
+  static constexpr char robot[] = R"(
+  <mujoco>
+    <asset>
+      <model name="child" file="sub/child.xml"/>
+    </asset>
+    <worldbody>
+      <body name="b">
+        <geom size="0.1"/>
+        <attach model="child" body="c" prefix="x_"/>
+      </body>
+    </worldbody>
+  </mujoco>)";
+
+  static constexpr char child[] = R"(
+  <mujoco>
+    <worldbody>
+      <body name="c">
+        <geom size="0.05"/>
+      </body>
+    </worldbody>
+  </mujoco>)";
+
+  // Restores the working directory on scope exit, even when an assertion
+  // fails partway through the test.
+  struct ScopedCwd {
+    explicit ScopedCwd(const std::filesystem::path& dir)
+        : old_(std::filesystem::current_path()) {
+      std::filesystem::current_path(dir);
+    }
+    ~ScopedCwd() { std::filesystem::current_path(old_); }
+    std::filesystem::path old_;
+  };
+
+  std::filesystem::path root =
+      std::filesystem::temp_directory_path() / "mujoco_model_asset_in_include";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "case2" / "sub");
+  std::ofstream(root / "case2" / "scene.xml") << scene;
+  std::ofstream(root / "case2" / "robot.xml") << robot;
+  std::ofstream(root / "case2" / "sub" / "child.xml") << child;
+
+  std::array<char, 1024> error;
+
+  // Loaded as "case2/scene.xml" from the directory above: the <model>
+  // lives in the included file.
+  {
+    ScopedCwd cwd(root);
+    mjModel* model = mj_loadXML("case2/scene.xml", nullptr, error.data(), error.size());
+    ASSERT_THAT(model, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(model);
+
+    // The included file on its own: the <model> is relative to the model
+    // directory, with no <include> involved.
+    mjModel* direct = mj_loadXML("case2/robot.xml", nullptr, error.data(), error.size());
+    ASSERT_THAT(direct, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(direct, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(direct);
+  }
+
+  // Loaded as "scene.xml" from inside the directory: the model directory
+  // is empty and the file is found from the working directory.
+  {
+    ScopedCwd cwd(root / "case2");
+    mjModel* model = mj_loadXML("scene.xml", nullptr, error.data(), error.size());
+    ASSERT_THAT(model, NotNull()) << error.data();
+    EXPECT_GE(mj_name2id(model, mjOBJ_BODY, "x_c"), 0);
+    mj_deleteModel(model);
+  }
+
+  std::filesystem::remove_all(root);
 }
 
 TEST_F(XMLReaderTest, MaterialTextureTest) {
